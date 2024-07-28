@@ -2,17 +2,13 @@
 #include <stdint.h>
 #include <stdlib.h>
 
+// String structure
 struct _String {
 	char* data;// DO NOT READ OR WRITE TO THIS DATA MANUALLY. USE THE FUNCTIONS.
 	size_t length;// READ ONLY. DO NOT OVERWRITE.
+	int flag_avoid_GC;// Okay to read/write, but ideally use str_set_avoid_GC and set_clear_avoid_GC.
 };
 typedef struct _String* string;
-
-struct _String_LL_GC {
-	struct _String_LL_GC* prev;
-	struct _String* str;
-	struct _String_LL_GC* next;
-};
 
 const int32_t __float_nan_value = 0x7fc00000;
 const int64_t __double_nan_value = 0x7ff8000000000000;
@@ -22,7 +18,48 @@ const int64_t __double_nan_value = 0x7ff8000000000000;
 #define DOUBLE_NAN *((double*)(&__double_nan_value))
 #define SCI_NOT_LIM 10 // scientific notation character limit for when converting floating point numbers to strings
 
+// String linked list used for garbage collection. Please do not use.
+struct _String_LL_GC {
+	struct _String_LL_GC* prev;
+	struct _String* str;
+	struct _String_LL_GC* next;
+};
 
+struct _String_LL_GC _String_GC_LL = { .prev = NULL, .str = NULL, .next = NULL };
+
+// RESERVED. DO NOT USE
+void __str_add_LLGC(struct _String* str) {
+
+	if (!str) return;
+	struct _String_LL_GC* curr = &_String_GC_LL;
+	while (curr->next) curr = curr->next;
+
+	if (!(curr->next = malloc(sizeof(struct _String_LL_GC)))) return;
+	curr->next->prev = curr;
+	curr->next->str = str;
+	curr->next->next = NULL;
+}
+
+// RESERVED. DO NOT USE
+void __str_remove_LLGC(struct _String* str) {
+
+	if (!str) return;
+	struct _String_LL_GC* curr = &_String_GC_LL;
+	while (curr->next) {
+
+		curr = curr->next;
+		if (!curr->str) continue;
+		if (curr->str == str && !curr->str->flag_avoid_GC) {
+
+			curr->next->prev = curr->prev;
+			curr->prev->next = curr->next;
+			free(curr);
+			break;
+		}
+	}
+}
+
+#pragma region MEMORY ANALYSIS FUNCTIONS
 // -------------------------
 // MEMORY ANALYSIS FUNCTIONS
 // -------------------------
@@ -73,15 +110,17 @@ void* mem_find(void* src, size_t lim, void* key, size_t key_size) {
 
 	return NULL;
 }
+#pragma endregion
 
+#pragma region STRING MEMORY MANAGEMENT
 // ------------------------
 // STRING MEMORY MANAGEMENT
 // ------------------------
 
 // creates a new string struct from a char array/pointer.
-// this will crash if pointer leads to non-null junk data, so you're in charge of figuring that out.
-// this copies the contents of text into a new string structure which must free it with delete_str after use.
-// be careful to never use any function that creates a new string pointer in a place where you won't be able to free it.
+// this will crash if pointer leads to non-null junk data or a string without a terminator.
+// this copies the contents of text into a new string structure which must freed it with str_delete after use.
+// if return value is not stored, string must be freed with str_delete_all.
 string str_new(char* text) {
 
 	int32_t length = 0;
@@ -100,6 +139,8 @@ string str_new(char* text) {
 
 	mem_cpy(newstr->data, text, length + 1); // possible improvement: combine with other while loop
 
+	__str_add_LLGC(newstr);
+	newstr->flag_avoid_GC = 0;
 	return newstr;
 
 error2:
@@ -139,6 +180,7 @@ char* str_get_text(string str) {
 // free the memory used by the string structure, including the struct itself.
 void str_delete(string str) {
 	
+	__str_remove_LLGC(str);
 	free(str->data);
 	free(str);
 }
@@ -147,20 +189,8 @@ void str_delete(string str) {
 // returns null on error.
 string str_copy(string str) {
 
-	string newstr = NULL;
-
-	if (!(newstr = malloc(sizeof(string)))) goto error;
-	if (!(newstr->data = malloc(newstr->length + 1))) goto error2;
-
-	newstr->length = str->length;
-	mem_cpy(newstr->data, str->data, str->length + 1);
-
+	string newstr = str_new(str->data);
 	return newstr;
-
-error2:
-	free(newstr);
-error:
-	return NULL;
 }
 
 // copies the contents of a string to a new char buffer.
@@ -183,6 +213,39 @@ void str_to_buf(string str, char* buf) {
 
 	mem_cpy(buf, str->data, str->length); //segfault here if buf is garbage data
 }
+
+// marks a flag to prevent this string from being cleared by str_delete_all. this means that this string MUST be freed with str_delete.
+void str_set_avoid_GC(string str) {
+	str->flag_avoid_GC = 1;
+}
+
+// clears flag so that string is freed when str_delete_all is called.
+void str_clear_avoid_GC(string str) {
+	str->flag_avoid_GC = 0;
+}
+
+// deletes all strings left that haven't been freed. This deletes all strings except those with the avoid_GC flag set, so be careful.
+void str_delete_all(void) {
+
+	struct _String_LL_GC* curr = &_String_GC_LL;
+	while (curr->next) {
+
+		curr = curr->next;
+		if (!curr->str) continue;
+		if (!curr->str->flag_avoid_GC) {
+
+			free(curr->str->data);
+			free(curr->str);
+			curr->next->prev = curr->prev;
+			curr->prev->next = curr->next;
+			void* to_del = curr;
+			curr = curr->prev;
+			free(to_del);
+			continue;
+		}
+	}
+}
+#pragma endregion
 
 #pragma region STRING TO NUMBER CONVERSION
 // ---------------------------
@@ -644,9 +707,23 @@ char chr_to_lower(char c) {
 }
 #pragma endregion
 
+#pragma region STRING MANIPULATION
 // -------------------
 // STRING MANIPULATION
 // ------------------- 
+
+// crops the given string down to a new string comprising of the characters from start to end, which are indexes into the string.
+// returns modified string, returns the original string on error.
+string str_crop(string str, size_t start, size_t end) {
+	
+	if (start > end || end > str->length) return str;
+
+	mem_cpy(str->data, str->data[start], end - start);
+	str->length = end - start;
+	str->data[str->length] = '\0';
+
+	return str;
+}
 
 // appends str_src onto the end of str_dst.
 // returns str_dst upon success, null upon failure.
@@ -677,20 +754,8 @@ string str_append_sec(string str_dst, string str_src, size_t start, size_t end) 
 	string cpy = str_copy(str_src);
 	str_crop(cpy, start, end);
 	str_append(str_dst, cpy);
+	str_delete(cpy);
 	return str_dst;
-}
-
-// crops the given string down to a new string comprising of the characters from start to end, which are indexes into the string.
-// returns modified string, returns the original string on error.
-string str_crop(string str, size_t start, size_t end) {
-	
-	if (start > end || end > str->length) return str;
-
-	mem_cpy(str->data, str->data[start], end - start);
-	str->length = end - start;
-	str->data[str->length] = '\0';
-
-	return str;
 }
 
 // returns 1 if both given strings contain the same data, 0 if not.
@@ -713,10 +778,10 @@ string str_trim(string str) {
 
 	if (str->length <= 0) return str;
 
-	while (!chr_is_printable(str->data[start])) start++;
+	while (!chr_is_visible(str->data[start])) start++;
 	if (start == str->length) return str;
 
-	while (!chr_is_printable(str->data[end])) end--;
+	while (!chr_is_visible(str->data[end])) end--;
 
 	return str_crop(str, start, end);
 }
@@ -734,3 +799,4 @@ string str_to_lower(string str) {
 	for (int32_t i = 0; i < str->length; i++) chr_to_lower(str->data[i]);
 	return str;
 }
+#pragma endregion
