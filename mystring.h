@@ -10,12 +10,20 @@ struct _String {
 };
 typedef struct _String* string;
 
-const int32_t __float_nan_value = 0x7fc00000;
-const int64_t __double_nan_value = 0x7ff8000000000000;
+const uint32_t __float_nan_value = 0x7fc00000;
+const uint32_t __float_inf_value = 0x7f800000;
+const uint32_t __float_neg_inf_value = 0xff800000;
+const uint64_t __double_nan_value = 0x7ff8000000000000;
+const uint64_t __double_inf_value = 0x7ff0000000000000;
+const uint64_t __double_neg_inf_value = 0xfff0000000000000;
 
 #define EMPTY_STR (string){.data = calloc(1, sizeof(char)), .length = 0}
 #define FLOAT_NAN *((float*)(&__float_nan_value))
+#define FLOAT_INF *((float*)(&__float_inf_value))
+#define FLOAT_NEG_INF *((float*)(&__float_neg_inf_value))
 #define DOUBLE_NAN *((double*)(&__double_nan_value))
+#define DOUBLE_INF *((double*)(&__double_inf_value))
+#define DOUBLE_NEG_INF *((double*)(&__double_neg_inf_value))
 #define SCI_NOT_LIM 10 // scientific notation character limit for when converting floating point numbers to strings
 
 // String linked list used for garbage collection. Please do not use.
@@ -110,6 +118,16 @@ void* mem_find(void* src, size_t lim, void* key, size_t key_size) {
 
 	return NULL;
 }
+
+// fills lim bytes of memory starting at dst with value of parameter byte.
+void mem_set(void* dst, unsigned char byte, size_t lim) {
+	
+	if (!dst) return;
+
+	for (size_t i = 0; i < lim; i++) {
+		((char*)dst)[i] = byte;
+	}
+}
 #pragma endregion
 
 #pragma region STRING MEMORY MANAGEMENT
@@ -185,14 +203,6 @@ void str_delete(string str) {
 	free(str);
 }
 
-// returns a new string struct with the same values as the given string struct.
-// returns null on error.
-string str_copy(string str) {
-
-	string newstr = str_new(str->data);
-	return newstr;
-}
-
 // copies the contents of a string to a new char buffer.
 // this returns allocated memory, please free after use.
 char* str_to_arr(string str) {
@@ -264,6 +274,8 @@ int32_t str_to_int(string str) {
 	const LIM_LEN = 11;
 	const LIM_DIGIT = 7;
 
+	if (!str) return 0;
+
 	if (!str->data) return 0;
 
 	if (str->length > LIM_LEN || str->length <= 0) return 0;
@@ -305,6 +317,8 @@ uint32_t str_to_uint(string str) {
 	const LIM_LEN = 10;
 	const LIM_DIGIT = 5;
 
+	if (!str) return 0;
+
 	if (!str->data) return 0;
 
 	if (str->length > LIM_LEN || str->length <= 0) return 0;
@@ -335,6 +349,8 @@ int64_t str_to_lng(string str) {
 	const int64_t LIM_MUL = LIM_ADD / 10;
 	const LIM_LEN = 20;
 	const LIM_DIGIT = 7;
+
+	if (!str) return 0;
 
 	if (!str->data) return 0;
 
@@ -376,6 +392,8 @@ uint64_t str_to_ulng(string str) {
 	const uint64_t LIM_MUL = LIM_ADD / 10;
 	const LIM_LEN = 20;
 	const LIM_DIGIT = 5;
+
+	if (!str) return 0;
 
 	if (!str->data) return 0;
 
@@ -505,12 +523,11 @@ string str_from_int(int32_t num) {
 	if (num < 0) {
 		i++;
 		ret->data[0] = '-';
-		num *= -1;
-		if (num == len_temp) {//si num = 0x80000000, impossible de faire *= -1. (seulement pour systèmes 32 bit)
+		if (num == 0x80000000) {//if num = 0x80000000, *= -1 is an overflow. (only for 32 bit systems)
 			num++;
-			num *= -1;
 			abs_min_bugfix = 1;
 		}
+		num *= -1;
 	}
 
 	while (len_temp) {
@@ -564,18 +581,17 @@ string str_from_lng(int64_t num) {
 	int i = 0;
 	int abs_min_bugfix = 0;
 	int64_t len_temp = num;
-	string ret = str_new("-9223372036854775807");
+	string ret = str_new("-9223372036854775808");
 	if (ret->length == 0) return NULL;
 
 	if (num < 0) {
 		i++;
 		ret->data[0] = '-';
-		num *= -1;
-		if (num == len_temp) {//si num = 0x8000000000000000, impossible de faire *= -1.
+		if (num == 0x8000000000000000) {//if num = 0x8000000000000000, *= -1 is an overflow.
 			num++;
-			num *= -1;
 			abs_min_bugfix = 1;
 		}
+		num *= -1;
 	}
 
 	while (len_temp) {
@@ -627,9 +643,21 @@ string str_from_ulng(uint64_t num) {
 // returns null on error.
 string str_from_flt(float num, int sci_not) {
 
-	
-	string ret = str_new("test");
-	if (ret->length == 0) return NULL;
+	union {
+		float f;
+		uint32_t i;
+	} number;
+	number.f = num;
+	string ret;
+
+	// exceptions to the float calculation formula
+	if (number.i & 0x7fffffff > __float_inf_value) return str_new("NaN");
+	if (number.i == __float_inf_value) return str_new("Infinity");
+	if (number.i == __float_neg_inf_value) return str_new("-Infinity");
+	if (number.i == 0) return str_new("0.0");
+	if (number.i == 0x80000000) return str_new("-0.0");
+
+	//??
 }
 // creates and returns a new string from a given unsigned 64bit integer.
 // returns null on error.
@@ -705,6 +733,29 @@ char chr_to_lower(char c) {
 	if (!chr_is_upper(c)) return c;
 	return (char)(c + ('a' - 'A'));
 }
+
+// creates a new string that consists of factor times char c.
+// returns the new string, empty string on error.
+string chr_mul(char c, int32_t factor) {
+
+	string ret;
+	char* str;
+
+	if (factor <= 0) {
+		ret = str_new("");
+		return ret;
+	}
+
+	str = malloc(sizeof(char) * (factor + 1));
+
+	for (int i = 0; i < factor; i++) str[i] = c;
+	str[factor] = '\0';
+
+	str_set_text(ret, str);
+	free(str);
+
+	return ret;
+}
 #pragma endregion
 
 #pragma region STRING MANIPULATION
@@ -716,6 +767,8 @@ char chr_to_lower(char c) {
 // returns modified string, returns the original string on error.
 string str_crop(string str, size_t start, size_t end) {
 	
+	if (!str) return NULL;
+
 	if (start > end || end > str->length) return str;
 
 	mem_cpy(str->data, str->data[start], end - start);
@@ -729,7 +782,8 @@ string str_crop(string str, size_t start, size_t end) {
 // returns str_dst upon success, null upon failure.
 string str_append(string str_dst, string str_src) {
 
-	if (str_dst->length < 0 || str_src->length < 0) return NULL;
+	if (!str_dst) str_dst = str_new("");
+	if (!str_src) return str_dst;
 
 	if (str_src->length == 0) return str_dst;
 
@@ -751,6 +805,10 @@ string str_append(string str_dst, string str_src) {
 // appends a given section of str_src onto the end of str_dst.
 // returns str_dst upon success, null upon failure.
 string str_append_sec(string str_dst, string str_src, size_t start, size_t end) {
+
+	if (!str_dst) str_dst = str_new("");
+	if (!str_src) return str_dst;
+
 	string cpy = str_copy(str_src);
 	str_crop(cpy, start, end);
 	str_append(str_dst, cpy);
@@ -758,8 +816,31 @@ string str_append_sec(string str_dst, string str_src, size_t start, size_t end) 
 	return str_dst;
 }
 
+// returns a new string struct with the same values as the given string struct.
+// returns null on error.
+string str_copy(string str) {
+
+	if (!str) return NULL;
+
+	string newstr = str_new(str->data);
+	return newstr;
+}
+
+// returns a new string struct with the contents matching the given portion within and including indexes start and end.
+// returns null on error.
+string str_copy_sec(string str, size_t start, size_t end) {
+
+	if (!str) return NULL;
+
+	string ret = str_new(str->data);
+	str_crop(ret, start, end);
+	return ret;
+}
+
 // returns 1 if both given strings contain the same data, 0 if not.
 int str_comp(string str1, string str2) {
+
+	if (!str1 || !str2) return str1 == str2;
 
 	if (str1->length != str2->length) return 0;
 
@@ -776,6 +857,8 @@ string str_trim(string str) {
 	int32_t start = 0;
 	int32_t end = str->length - 1;
 
+	if (!str) return NULL;
+
 	if (str->length <= 0) return str;
 
 	while (!chr_is_visible(str->data[start])) start++;
@@ -789,6 +872,7 @@ string str_trim(string str) {
 // converts all lowercase characters in a string to uppercase.
 string str_to_upper(string str) {
 
+	if (!str) return NULL;
 	for (int32_t i = 0; i < str->length; i++) chr_to_upper(str->data[i]);
 	return str;
 }
@@ -796,7 +880,155 @@ string str_to_upper(string str) {
 // converts all uppercase characters in a string to lowercase.
 string str_to_lower(string str) {
 
+	if (!str) return NULL;
 	for (int32_t i = 0; i < str->length; i++) chr_to_lower(str->data[i]);
 	return str;
 }
+
+// replaces str with the contents of str repeated factor times.
+// returns str, null on error.
+string str_mul(string str, int32_t factor) {
+
+	if (!str) return NULL;
+
+	if (factor <= 0) {
+		str_set_text(str, ""); return;
+	}
+
+	for (int32_t i = 0; i < factor - 1; i++) {
+		str_append(str, str);
+	}
+
+	return str;
+}
+#pragma endregion
+
+#pragma region STRING SEARCH
+// -------------
+// STRING SEARCH
+// -------------
+
+// find the first occurence of a character in a string.
+// returns the index of the character in the string, and the length of the string if the character was not found.
+size_t str_find_chr(string str, char chr) {
+
+	if (!str) return 0;
+
+	for (size_t i = 0; i < str->length; i++) {
+
+		if (str->data[i] == chr) return i;
+	}
+	
+	return str->length;
+}
+
+// find the last occurence of a character in a string.
+// returns the index of the character in the string, and the length of the string if the character was not found.
+size_t str_find_last_chr(string str, char chr) {
+
+	if (!str) return 0;
+
+	for (size_t i = str->length - 1; i >= 0; i--) {
+
+		if (str->data[i] == chr) return i;
+	}
+
+	return str->length;
+}
+
+// finds the first longest sequence of characters in str that is only comprised of characters found in chrs_to_find.
+// setting the not parameter to a non-zero value does the opposite, and looks for the longest sequence that doesn't contain the given characters.
+// returns the index of the beginning of the sequence found, and the length of the string if none were found.
+size_t str_find_chrs(string str, string chrs_to_find, int not) {
+
+	size_t count = 0;
+	size_t record = 0;
+	size_t record_loc = 0;
+	int chr_found = 0;
+
+	if (!str) return 0;
+	if (!chrs_to_find) return str->length;
+
+	for (size_t i = 0; i < str->length; i++) {
+
+		for (size_t j = 0; j < chrs_to_find->length; j++) {
+
+			if (not) {
+				if (str->data[i] == chrs_to_find->data[j]) continue;
+			}
+			else {
+				if (str->data[i] != chrs_to_find->data[j]) continue;
+			}
+			
+			count++;
+			chr_found = 1;
+
+			break;
+		}
+
+		if (!chr_found) {
+
+			if (count > record) {
+
+				record = count;
+				record_loc = i - record;
+			}
+
+			count = 0;
+		}
+
+		chr_found = 0;
+	}
+
+	if (record > 0) return record;
+
+	return str->length;
+}
+
+// finds the first character in str that is also contained within chrs_to_find.
+// returns the index of the character found, and the length of the string if none were found.
+size_t str_find_str_chr(string str, string chrs_to_find, int not) {
+
+	if (!str) return 0;
+	if (!chrs_to_find) return str->length;
+
+	for (size_t i = 0; i < str->length; i++) {
+
+		for (size_t j = 0; j < chrs_to_find->length; j++) {
+
+			if (not) {
+				if (str->data[i] == chrs_to_find->data[j]) continue;
+			}
+			else {
+				if (str->data[i] != chrs_to_find->data[j]) continue;
+			}
+
+			return i;
+		}
+	}
+	
+	return str->length;
+}
+
+// finds the first occurence of sub_str within str.
+// returns the index of the start of the substring, the length of str if not found.
+size_t str_find_str(string str, string sub_str) {
+
+	size_t count = 0;
+	int str_found = 0;
+
+	if (!str) return 0;
+	if (!sub_str) return str->length;
+
+	for (size_t i = 0; i < str->length; i++) {
+
+		if (str->data[i] == sub_str->data[count]) count++;
+		else count = 0;
+
+		if (count == sub_str->length) return i - sub_str->length;
+	}
+
+	return str->length;
+}
+
 #pragma endregion
