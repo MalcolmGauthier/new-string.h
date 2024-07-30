@@ -59,7 +59,7 @@ void __str_remove_LLGC(struct _String* str) {
 		if (!curr->str) continue;
 		if (curr->str == str && !curr->str->flag_avoid_GC) {
 
-			curr->next->prev = curr->prev;
+			if (curr->next) curr->next->prev = curr->prev;
 			curr->prev->next = curr->next;
 			free(curr);
 			break;
@@ -73,27 +73,39 @@ void __str_remove_LLGC(struct _String* str) {
 // -------------------------
 
 // copies lim bytes of memory from src to dst. returns dst.
+// will only fail if malloc fails.
 void* mem_cpy(void* dst, void* src, size_t lim) {
 
-	while (lim--) ((char*)dst)[lim] = ((char*)src)[lim];
+	char* buff = malloc(lim);
+	if (!buff) return NULL;
+	size_t len = lim;
+	while (len--) buff[len] = ((char*)src)[len];
+	while (lim--) ((char*)dst)[lim] = buff[lim];
+	free(buff);
 	return dst;
 }
 
 // copies memory chunk_size bytes at a time, and after each chunk, passes that chunk's pointer to a function.
 // if the custom functon returns a non-zero value, copying stops at that chunk.
-// acts the same as mem_cpy if function never returns non-zero.
+// acts the same as mem_cpy if custom function always returns zero.
+// returns NULL if malloc fails.
 void* mem_cpy_cond(void* dst, void* src, size_t lim, int (*func)(void*), size_t chunk_size) {
 
 	size_t i = 0;
 	char* chunk_loc = dst;
+	char* buff = malloc(lim);
+	if (!buff) return NULL;
+	size_t len = lim;
 	while (i < lim) {
 
-		((char*)dst)[i] = ((char*)src)[i];
+		buff[i] = ((char*)src)[i];
+		i++;
 		if (i % chunk_size == 0) {
 			chunk_loc += chunk_size;
 			if ((*func)(chunk_loc)) break;
 		}
 	}
+	while (i--) ((char*)dst)[i] = buff[i];
 
 	return dst;
 }
@@ -108,11 +120,11 @@ int mem_comp(void* area1, void* area2, size_t lim) {
 	return 1;
 }
 
-// looks through lim bytes starting at src to try and find memory matching the first key_size bytes at key.
+// looks through lim bytes key_size bytes at a time starting at src to try and find memory matching the first key_size bytes at key.
 // returns the first found memory adress, null if none are found.
 void* mem_find(void* src, size_t lim, void* key, size_t key_size) {
 
-	for (size_t i = 0; i < lim; i++) {
+	for (size_t i = 0; i < lim; i += key_size) {
 		if (mem_comp(&(((char*)src)[i]), ((char*)key), key_size)) return &(((char*)src)[i]);
 	}
 
@@ -246,7 +258,7 @@ void str_delete_all(void) {
 
 			free(curr->str->data);
 			free(curr->str);
-			curr->next->prev = curr->prev;
+			if (curr->next) curr->next->prev = curr->prev;
 			curr->prev->next = curr->next;
 			void* to_del = curr;
 			curr = curr->prev;
@@ -638,32 +650,237 @@ string str_from_ulng(uint64_t num) {
 
 	return ret;
 }
-// creates and returns a new string from a given unsigned 64bit integer.
-// set sci_not to 1 to use scientific notation on strings longer than
-// returns null on error.
-string str_from_flt(float num, int sci_not) {
 
+string str_append_chr(string str, char src); // defenition for use in str_from_flt/dbl
+string str_insert_chr(string str, char add, size_t index); // defenition for use in str_from_flt/dbl
+string str_crop(string str, size_t start, size_t end); // defenition for use in str_from_flt/dbl
+// RESERVED. DO NOT USE.
+char* __add(char* c1, char* c2, int l) {
+	int r = 0;
+	for (int i = l - 1; i >= 0; i--) {
+		c1[i] += c2[i];
+		if (r) {
+			c1[i]++;
+			r = 0;
+		}
+		if (c1[i] >= 10) {
+			c1[i] %= 10;
+			r = 1;
+		}
+	}
+	return c1;
+}
+// RESERVED. DO NOT USE.
+char* __mul(char* a, int l) {
+	int r = 0;
+	for (int i = l - 1; i >= 0; i--) {
+		a[i] <<= 1;
+		if (r) {
+			a[i]++;
+			r = 0;
+		}
+		if (a[i] >= 10) {
+			r = 1;
+			a[i] %= 10;
+		}
+	}
+	return a;
+}
+// RESERVED. DO NOT USE.
+char* __div(char* a, int l) {
+	int r = 0;
+	for (int i = 0; i < l; i++) {
+		if (r) {
+			a[i] += 10;
+			r = 0;
+		}
+		if (a[i] & 1) r = 1;
+		a[i] >>= 1;
+	}
+	return a;
+}
+// creates and returns a new string from a given 32 bit floating point number.
+// TODO: uses scientific notation for results larger than SCI_NOT_LIM digits.
+// returns new string.
+string str_from_flt(float num) {
+
+#define a_lim 50
 	union {
 		float f;
 		uint32_t i;
-	} number;
-	number.f = num;
+	} number = { .f = num };
 	string ret;
+	uint8_t exp = (number.i & 0x7F800000) >> 23;
+	char dig_arr[a_lim] = { 0 };
+	char dig_arr2[a_lim] = { 0 };
+	int real_exp;
+	int dot_loc;
+	int32_t cur_m_dig = 0x00400000;
+	int is_neg;
 
 	// exceptions to the float calculation formula
-	if (number.i & 0x7fffffff > __float_inf_value) return str_new("NaN");
+	if ((number.i & 0x7fffffff) > __float_inf_value) return str_new("NaN");
 	if (number.i == __float_inf_value) return str_new("Infinity");
 	if (number.i == __float_neg_inf_value) return str_new("-Infinity");
-	if (number.i == 0) return str_new("0.0");
-	if (number.i == 0x80000000) return str_new("-0.0");
+	if (number.i == 0) return str_new("0");
+	if (number.i == 0x80000000) return str_new("-0");
 
-	//??
+	ret = str_new("");
+	is_neg = num < 0.0f;
+	number.i &= 0x7fffffff;
+
+	if (exp < 129) dot_loc = 1;
+	else if (exp >= 150) dot_loc = a_lim;
+	else dot_loc = a_lim / 2;
+
+	dig_arr[dot_loc - 1] = 1;
+	real_exp = exp - 127;
+
+	if (real_exp > 0) {
+		while (real_exp--) __mul(dig_arr, a_lim);
+	}
+	else {
+		while (real_exp++) __div(dig_arr, a_lim);
+	}
+
+	mem_cpy(dig_arr2, dig_arr, a_lim);
+	while (cur_m_dig) {
+		__div(dig_arr2, a_lim);
+		if (number.i & cur_m_dig) __add(dig_arr, dig_arr2, a_lim);
+		cur_m_dig >>= 1;
+	}
+
+	for (int i = 0; i < a_lim; i++) {
+		str_append_chr(ret, dig_arr[i] + '0');
+	}
+
+	if (dot_loc != a_lim) str_insert_chr(ret, '.', dot_loc);
+
+	int crop_point = -1;
+	if (dot_loc != a_lim) {
+
+		for (int i = ret->length - 1; i >= 1; i--) {
+
+			if (ret->data[i] != '0') {
+				crop_point = i;
+				break;
+			}
+		}
+		
+		if (crop_point > 0) str_crop(ret, 0, crop_point);
+	}
+
+	crop_point = -1;
+	if (dot_loc != 1) {
+
+		for (int i = 0; i < ret->length; i++) {
+
+			if (ret->data[i] != '.' && ret->data[i] != '0') {
+				crop_point = i;
+				break;
+			}
+		}
+		
+		if (crop_point > 0) str_crop(ret, crop_point, ret->length);
+	}
+
+	if (is_neg) str_insert_chr(ret, '-', 0);
+
+	return ret;
+
+#undef a_lim
 }
-// creates and returns a new string from a given unsigned 64bit integer.
-// returns null on error.
+
+// creates and returns a new string from a given 64 bit floating point number.
+// TODO: uses scientific notation for results larger than SCI_NOT_LIM digits.
+// returns new string.
 string str_from_dbl(double num) {
 
+#define a_lim 340
+	union {
+		double f;
+		uint64_t i;
+	} number = { .f = num };
+	string ret;
+	uint16_t exp = (number.i & 0x7FF0000000000000) >> 52;
+	char dig_arr[a_lim] = { 0 };
+	char dig_arr2[a_lim] = { 0 };
+	int real_exp;
+	int dot_loc;
+	int64_t cur_m_dig = 0x0008000000000000;
+	int is_neg;
 
+	// exceptions to the float calculation formula
+	if ((number.i & 0x7fffffffffffffff) > __double_inf_value) return str_new("NaN");
+	if (number.i == __double_inf_value) return str_new("Infinity");
+	if (number.i == __double_neg_inf_value) return str_new("-Infinity");
+	if (number.i == 0) return str_new("0");
+	if (number.i == 0x8000000000000000) return str_new("-0");
+
+	ret = str_new("");
+	is_neg = num < 0.0;
+	number.i &= 0x7fffffffffffffff;
+
+	if (exp < 1025) dot_loc = 1;
+	else if (exp >= 1075) dot_loc = a_lim;
+	else dot_loc = a_lim / 2;
+
+	dig_arr[dot_loc - 1] = 1;
+	real_exp = exp - 1023;
+
+	if (real_exp > 0) {
+		while (real_exp--) __mul(dig_arr, a_lim);
+	}
+	else {
+		while (real_exp++) __div(dig_arr, a_lim);
+	}
+
+	mem_cpy(dig_arr2, dig_arr, a_lim);
+	while (cur_m_dig) {
+		__div(dig_arr2, a_lim);
+		if (number.i & cur_m_dig) __add(dig_arr, dig_arr2, a_lim);
+		cur_m_dig >>= 1;
+	}
+
+	for (int i = 0; i < a_lim; i++) {
+		str_append_chr(ret, dig_arr[i] + '0');
+	}
+
+	if (dot_loc != a_lim) str_insert_chr(ret, '.', dot_loc);
+
+	int crop_point = -1;
+	if (dot_loc != a_lim) {
+
+		for (int i = ret->length - 1; i >= 1; i--) {
+
+			if (ret->data[i] != '0') {
+				crop_point = i;
+				break;
+			}
+		}
+
+		if (crop_point > 0) str_crop(ret, 0, crop_point);
+	}
+
+	crop_point = -1;
+	if (dot_loc != 1) {
+
+		for (int i = 0; i < ret->length; i++) {
+
+			if (ret->data[i] != '.' && ret->data[i] != '0') {
+				crop_point = i;
+				break;
+			}
+		}
+
+		if (crop_point > 0) str_crop(ret, crop_point, ret->length);
+	}
+
+	if (is_neg) str_insert_chr(ret, '-', 0);
+
+	return ret;
+
+#undef a_lim
 }
 #pragma endregion
 
@@ -738,15 +955,16 @@ char chr_to_lower(char c) {
 // returns the new string, empty string on error.
 string chr_mul(char c, int32_t factor) {
 
-	string ret;
+	string ret = str_new("");
 	char* str;
 
 	if (factor <= 0) {
-		ret = str_new("");
+
 		return ret;
 	}
 
 	str = malloc(sizeof(char) * (factor + 1));
+	if (!str) return ret;
 
 	for (int i = 0; i < factor; i++) str[i] = c;
 	str[factor] = '\0';
@@ -771,19 +989,34 @@ string str_crop(string str, size_t start, size_t end) {
 
 	if (start > end || end > str->length) return str;
 
-	mem_cpy(str->data, str->data[start], end - start);
+	mem_cpy(str->data, str->data + start, end - start);
 	str->length = end - start;
 	str->data[str->length] = '\0';
 
 	return str;
 }
 
+// returns a new string struct with the same values as the given string struct.
+// returns null on error.
+string str_copy(string str) {
+
+	if (!str) return NULL;
+
+	string newstr = str_new(str->data);
+	return newstr;
+}
+
 // appends str_src onto the end of str_dst.
 // returns str_dst upon success, null upon failure.
 string str_append(string str_dst, string str_src) {
 
-	if (!str_dst) str_dst = str_new("");
-	if (!str_src) return str_dst;
+	if (!str_dst || !str_src) {
+
+		if (!str_dst && !str_src) return NULL;
+		if (!str_src) return str_dst;
+		
+		str_dst = str_new("");
+	}
 
 	if (str_src->length == 0) return str_dst;
 
@@ -806,8 +1039,13 @@ string str_append(string str_dst, string str_src) {
 // returns str_dst upon success, null upon failure.
 string str_append_sec(string str_dst, string str_src, size_t start, size_t end) {
 
-	if (!str_dst) str_dst = str_new("");
-	if (!str_src) return str_dst;
+	if (!str_dst || !str_src) {
+
+		if (!str_dst && !str_src) return NULL;
+		if (!str_src) return str_dst;
+
+		str_dst = str_new("");
+	}
 
 	string cpy = str_copy(str_src);
 	str_crop(cpy, start, end);
@@ -816,14 +1054,30 @@ string str_append_sec(string str_dst, string str_src, size_t start, size_t end) 
 	return str_dst;
 }
 
-// returns a new string struct with the same values as the given string struct.
-// returns null on error.
-string str_copy(string str) {
+// appends a character to the end of str.
+// returns str, null upon failure.
+string str_append_chr(string str, char src) {
 
-	if (!str) return NULL;
+	if (!str) {
+		char ret[2] = { src, '\0' };
+		return str_new(ret);
+	}
 
-	string newstr = str_new(str->data);
-	return newstr;
+	if (str->length == 0) {
+		char ret[2] = { src, '\0' };
+		str_set_text(str, ret);
+		return str;
+	}
+
+	char* data = realloc(str->data, str->length + 2);
+	if (!data) return NULL;
+
+	str->data = data;
+	str->data[str->length] = src;
+	str->data[str->length + 1] = '\0';
+
+	str->length++;
+	return str;
 }
 
 // returns a new string struct with the contents matching the given portion within and including indexes start and end.
@@ -898,6 +1152,46 @@ string str_mul(string str, int32_t factor) {
 	for (int32_t i = 0; i < factor - 1; i++) {
 		str_append(str, str);
 	}
+
+	return str;
+}
+
+// inserts string 'add' at index 'index' of str.
+// returns str, null upon failure.
+string str_insert(string str, string add, size_t index) {
+
+	if (!add) return str;
+	if (!str) return add;
+	if (index > str->length) return NULL;
+
+	char* data = realloc(str->data, str->length + add->length + 1);
+	if (!data) return NULL;
+
+	str->data = data;
+	mem_cpy(str->data + index + add->length, str->data + index, str->length - index);
+	mem_cpy(str->data + index, add->data, add->length);
+	str->length += add->length;
+	str->data[str->length] = '\0';
+
+	return str;
+}
+
+// inserts character 'add' at index 'index' of str.
+// returns str, null upon failure.
+string str_insert_chr(string str, char add, size_t index) {
+
+	if (!add) return str;
+	if (!str) return add;
+	if (index > str->length) return NULL;
+
+	char* data = realloc(str->data, str->length + 2);
+	if (!data) return NULL;
+
+	str->data = data;
+	mem_cpy(str->data + index + 1, str->data + index, str->length - index);
+	mem_cpy(str->data + index, &add, 1);
+	str->length += 1;
+	str->data[str->length] = '\0';
 
 	return str;
 }

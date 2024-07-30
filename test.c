@@ -3,11 +3,10 @@
 
 int main() {
 
-	string num = str_from_int(0x80000000);
-	string test = str_new("jwhdiuewhduiwhdi3yd73y7ydwyhdh23uyhduwhudhu7qdui");
-	test->flag_avoid_GC = 1;
-	printf("%s", str_get_text(num));
-
+	uint32_t f = 0x7f800001;
+	//printf("%s", str_get_text(str_from_flt(*(float*)(&f))));
+	printf("%s", str_get_text(str_from_dbl(0.00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000001)));
+	int _ = getchar();
 	str_delete_all();
 	return 0;
 }
