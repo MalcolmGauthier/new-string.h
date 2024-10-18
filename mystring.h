@@ -28,22 +28,19 @@ const uint64_t __double_neg_inf_value = 0xfff0000000000000;
 
 // String linked list used for garbage collection. Please do not use.
 struct _String_LL_GC {
-	struct _String_LL_GC* prev;
 	struct _String* str;
 	struct _String_LL_GC* next;
 };
 
-struct _String_LL_GC _String_GC_LL = { .prev = NULL, .str = NULL, .next = NULL };
+struct _String_LL_GC _String_GC_LL = { .str = NULL, .next = NULL };
 
 // RESERVED. DO NOT USE
 void __str_add_LLGC(struct _String* str) {
 
-	if (!str) return;
 	struct _String_LL_GC* curr = &_String_GC_LL;
 	while (curr->next) curr = curr->next;
 
 	if (!(curr->next = malloc(sizeof(struct _String_LL_GC)))) return;
-	curr->next->prev = curr;
 	curr->next->str = str;
 	curr->next->next = NULL;
 }
@@ -51,19 +48,24 @@ void __str_add_LLGC(struct _String* str) {
 // RESERVED. DO NOT USE
 void __str_remove_LLGC(struct _String* str) {
 
-	if (!str) return;
 	struct _String_LL_GC* curr = &_String_GC_LL;
 	while (curr->next) {
 
-		curr = curr->next;
-		if (!curr->str) continue;
-		if (curr->str == str && !curr->str->flag_avoid_GC) {
+		if (!curr->next->str) {
 
-			if (curr->next) curr->next->prev = curr->prev;
-			curr->prev->next = curr->next;
-			free(curr);
+			curr = curr->next;
+			continue;
+		}
+		if (curr->next->str == str) {
+
+			if (curr->next->str->flag_avoid_GC) return;
+			void* del = curr->next;
+			curr->next = curr->next->next;
+			free(del);
 			break;
 		}
+
+		curr = curr->next;
 	}
 }
 
@@ -199,17 +201,21 @@ void str_set_text(string str, char* text) {
 // returns pointer to the text found in the string in a safe way.
 // THE DATA POINTED TO SHOULD ONLY BE READ. To get a char array copy of the string, use str_to_arr.
 // returns NULL if error.
-char* str_get_text(string str) {
-
-	if (str->length < 0) return NULL;
-	if (!str->data) return calloc(1, sizeof(char));
-
-	return str->data;
-}
+// 
+// EDIT: removed, too dangerous. just use str_to_arr instead.
+// 
+//char* str_get_text(string str) {
+//
+//	if (str->length < 0) return NULL;
+//	if (!str->data) return NULL;
+//
+//	return str->data;
+//}
 
 // free the memory used by the string structure, including the struct itself.
 void str_delete(string str) {
 	
+	if (!str) return;
 	__str_remove_LLGC(str);
 	free(str->data);
 	free(str);
@@ -252,19 +258,21 @@ void str_delete_all(void) {
 	struct _String_LL_GC* curr = &_String_GC_LL;
 	while (curr->next) {
 
-		curr = curr->next;
-		if (!curr->str) continue;
-		if (!curr->str->flag_avoid_GC) {
+		if (!curr->next->str) {
 
-			free(curr->str->data);
-			free(curr->str);
-			if (curr->next) curr->next->prev = curr->prev;
-			curr->prev->next = curr->next;
-			void* to_del = curr;
-			curr = curr->prev;
-			free(to_del);
+			curr = curr->next;
 			continue;
 		}
+		if (!curr->next->str->flag_avoid_GC) {
+
+			free(curr->next->str->data);
+			free(curr->next->str);
+			//if (curr->next) curr->next->prev = curr->prev;
+			void* del = curr->next;
+			curr->next = curr->next->next;
+			free(del);
+		}
+
 	}
 }
 #pragma endregion
@@ -704,19 +712,20 @@ char* __div(char* a, int l) {
 // returns new string.
 string str_from_flt(float num) {
 
+	// 50 is more than the max number of digits a float as a string can have
 #define a_lim 50
 	union {
 		float f;
 		uint32_t i;
 	} number = { .f = num };
-	string ret;
-	uint8_t exp = (number.i & 0x7F800000) >> 23;
-	char dig_arr[a_lim] = { 0 };
-	char dig_arr2[a_lim] = { 0 };
-	int real_exp;
-	int dot_loc;
-	int32_t cur_m_dig = 0x00400000;
-	int is_neg;
+	string ret; // return value
+	uint8_t exp = (number.i & 0x7F800000) >> 23; // exponant value of float
+	char dig_arr[a_lim] = { 0 }; // byte array of digits for calculations
+	char dig_arr2[a_lim] = { 0 }; // byte array of digits for calculations
+	int real_exp; // signed exponant value of float
+	int dot_loc; // location of dot in the dig_arr arrays
+	int32_t cur_m_dig = 0x00400000; // bit mask of specific mantissa digit
+	int is_neg; // bool
 
 	// exceptions to the float calculation formula
 	if ((number.i & 0x7fffffff) > __float_inf_value) return str_new("NaN");
@@ -726,16 +735,24 @@ string str_from_flt(float num) {
 	if (number.i == 0x80000000) return str_new("-0");
 
 	ret = str_new("");
+	// set is_neg accordingly then take absolute value of the float
 	is_neg = num < 0.0f;
 	number.i &= 0x7fffffff;
 
+	// set dot location to have room for calculations.
+	// depending on exponent, the float will either look something like
+	// a) 0.0000000000000000025312751657
+	// b) 483924378564785168756847651965718953.0
+	// c) 2378563827.37458658752
 	if (exp < 129) dot_loc = 1;
 	else if (exp >= 150) dot_loc = a_lim;
 	else dot_loc = a_lim / 2;
 
+	// we start off with a value of 1.0 in dig_arr
 	dig_arr[dot_loc - 1] = 1;
 	real_exp = exp - 127;
 
+	// we multiply or divide this 1 by what the true value of the exponent is. floats are +/-1 * 2^E * M, we're starting by calculating 2^E
 	if (real_exp > 0) {
 		while (real_exp--) __mul(dig_arr, a_lim);
 	}
@@ -743,19 +760,24 @@ string str_from_flt(float num) {
 		while (real_exp++) __div(dig_arr, a_lim);
 	}
 
+	// copy the 2^E to dig_arr2
 	mem_cpy(dig_arr2, dig_arr, a_lim);
+	// check each bit of the mantissa to see if it is 1, if it is, add a power-of-two-fraction of the 2^E to our final result
 	while (cur_m_dig) {
 		__div(dig_arr2, a_lim);
 		if (number.i & cur_m_dig) __add(dig_arr, dig_arr2, a_lim);
 		cur_m_dig >>= 1;
 	}
 
+	// turn the bytes with value 0 to 9 into chars corresponding to literals '0' to '9'
 	for (int i = 0; i < a_lim; i++) {
 		str_append_chr(ret, dig_arr[i] + '0');
 	}
 
+	// insert dot if num has remainder
 	if (dot_loc != a_lim) str_insert_chr(ret, '.', dot_loc);
 
+	// crop unused digits off end of char array
 	int crop_point = -1;
 	if (dot_loc != a_lim) {
 
@@ -769,7 +791,7 @@ string str_from_flt(float num) {
 		
 		if (crop_point > 0) str_crop(ret, 0, crop_point);
 	}
-
+	// crop unused digits off start of char array
 	crop_point = -1;
 	if (dot_loc != 1) {
 
@@ -784,6 +806,7 @@ string str_from_flt(float num) {
 		if (crop_point > 0) str_crop(ret, crop_point, ret->length);
 	}
 
+	// insert dash if negative
 	if (is_neg) str_insert_chr(ret, '-', 0);
 
 	return ret;
@@ -796,6 +819,7 @@ string str_from_flt(float num) {
 // returns new string.
 string str_from_dbl(double num) {
 
+	// code from previous function applies here, now with doubles
 #define a_lim 340
 	union {
 		double f;
@@ -1222,7 +1246,7 @@ size_t str_find_last_chr(string str, char chr) {
 
 	if (!str) return 0;
 
-	for (size_t i = str->length - 1; i >= 0; i--) {
+	for (int64_t i = str->length - 1; i >= 0; i--) {
 
 		if (str->data[i] == chr) return i;
 	}
@@ -1309,7 +1333,6 @@ size_t str_find_str_chr(string str, string chrs_to_find, int not) {
 size_t str_find_str(string str, string sub_str) {
 
 	size_t count = 0;
-	int str_found = 0;
 
 	if (!str) return 0;
 	if (!sub_str) return str->length;
